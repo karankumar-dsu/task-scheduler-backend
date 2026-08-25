@@ -10,7 +10,7 @@ const router = express.Router();
 // Helper to resolve rank numerical score for relative comparison
 function getRoleRank(user) {
   if (!user) return 0;
-  
+
   const baseRanks = {
     "Admin": 5,
     "Division Head": 4,
@@ -20,31 +20,28 @@ function getRoleRank(user) {
     "Intern": 0,
   };
 
-  // Predefined role matching
   if (baseRanks[user.role] !== undefined) {
     return baseRanks[user.role];
   }
 
-  // Handle Dynamic / Custom Roles ("other")
   if (user.role === "other" && user.relation) {
     const refRank = baseRanks[user.relation.referenceRole] ?? 2;
-    // Position above reduces hierarchy score number (higher rank), below increases rank number
     return user.relation.position === "above" ? refRank + 0.5 : refRank - 0.5;
   }
 
-  return 1; // Default fallthrough for unspecified roles
+  return 1;
 }
 
 function makeToken(user) {
   return jwt.sign(
-    { 
-      id: user.id, 
-      name: user.name, 
+    {
+      id: user.id,
+      name: user.name,
       email: user.email,
       sapId: user.sapId || null,
       role: user.role || null,
       customRole: user.customRole || null,
-      department: user.department || null
+      department: user.department || null,
     },
     process.env.JWT_SECRET || "dev_secret",
     { expiresIn: "7d" }
@@ -60,7 +57,6 @@ router.post("/register", async (req, res) => {
       return res.status(400).json({ message: "Name, email, password, and SAP ID are required." });
     }
 
-    // Confirm Password Match Check
     if (confirmPassword && password !== confirmPassword) {
       return res.status(400).json({ message: "Passwords do not match." });
     }
@@ -68,12 +64,14 @@ router.post("/register", async (req, res) => {
     if (password.length < 6) {
       return res.status(400).json({ message: "Password must be at least 6 characters long." });
     }
-    if (User.findByEmail(email)) {
+
+    const existing = await User.findByEmail(email);
+    if (existing) {
       return res.status(409).json({ message: "An account with this email already exists." });
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
-    const user = User.createUser({ name, email, passwordHash, sapId });
+    const user = await User.createUser({ name, email, passwordHash, sapId });
     const token = makeToken(user);
 
     res.status(201).json({ token, user: User.toPublic(user) });
@@ -87,7 +85,7 @@ router.post("/register", async (req, res) => {
 router.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
-    const user = User.findByEmail(email || "");
+    const user = await User.findByEmail(email || "");
 
     if (!user) {
       return res.status(401).json({ message: "Invalid email or password." });
@@ -107,14 +105,14 @@ router.post("/login", async (req, res) => {
 });
 
 // 3. GET CURRENT USER
-router.get("/me", auth, (req, res) => {
-  const user = User.findById(req.user.id);
+router.get("/me", auth, async (req, res) => {
+  const user = await User.findById(req.user.id);
   if (!user) return res.status(404).json({ message: "User not found." });
   res.json({ user: User.toPublic(user) });
 });
 
-// 4. SETUP PROFILE / ONBOARDING (Supports Custom Roles, Hierarchy & SAP ID)
-const handleProfileSetup = (req, res) => {
+// 4. SETUP PROFILE / ONBOARDING
+const handleProfileSetup = async (req, res) => {
   try {
     const { role, customRole, relation, department, sapId } = req.body;
     if (!role || !department) {
@@ -129,13 +127,13 @@ const handleProfileSetup = (req, res) => {
       sapId: sapId || undefined,
     };
 
-    const updatedUser = User.updateProfile(req.user.id, profileData);
+    const updatedUser = await User.updateProfile(req.user.id, profileData);
     const newToken = makeToken(updatedUser);
 
-    res.json({ 
-      token: newToken, 
+    res.json({
+      token: newToken,
       user: User.toPublic(updatedUser),
-      message: "Profile setup completed successfully." 
+      message: "Profile setup completed successfully.",
     });
   } catch (err) {
     console.error("Setup Profile Error:", err);
@@ -147,15 +145,15 @@ router.put("/setup-profile", auth, handleProfileSetup);
 router.put("/onboarding", auth, handleProfileSetup);
 
 // 5. GET DEPARTMENT TEAM MEMBERS
-router.get("/team-members", auth, (req, res) => {
+router.get("/team-members", auth, async (req, res) => {
   try {
-    const currentUser = User.findById(req.user.id);
+    const currentUser = await User.findById(req.user.id);
     if (!currentUser || !currentUser.department) {
       return res.status(400).json({ message: "User department not configured." });
     }
 
     const currentUserRank = getRoleRank(currentUser);
-    const members = User.findByDepartment(currentUser.department);
+    const members = await User.findByDepartment(currentUser.department);
 
     const allowedMembers = members.filter((m) => {
       if (m.id === currentUser.id) return false;
@@ -182,7 +180,7 @@ router.get("/team-members", auth, (req, res) => {
 // 6. ADMIN ONLY: CREATE NEW MEMBER DIRECTLY
 router.post("/add-member", auth, async (req, res) => {
   try {
-    const currentUser = User.findById(req.user.id);
+    const currentUser = await User.findById(req.user.id);
     if (!currentUser || currentUser.role !== "Admin") {
       return res.status(403).json({ message: "Access denied. Admin only." });
     }
@@ -192,22 +190,23 @@ router.post("/add-member", auth, async (req, res) => {
       return res.status(400).json({ message: "All required fields must be provided." });
     }
 
-    if (User.findByEmail(email)) {
+    const existing = await User.findByEmail(email);
+    if (existing) {
       return res.status(409).json({ message: "An account with this email already exists." });
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
-    
-    const newUser = User.createUser({ 
-      name, 
-      email, 
-      passwordHash, 
+
+    const newUser = await User.createUser({
+      name,
+      email,
+      passwordHash,
       sapId: sapId || "",
-      role, 
+      role,
       customRole: role === "other" ? customRole : "",
       relation: role === "other" ? relation : null,
       department,
-      assignableBy: assignableBy || [] 
+      assignableBy: assignableBy || [],
     });
 
     res.status(201).json({ message: "New member added successfully.", user: User.toPublic(newUser) });
@@ -225,7 +224,7 @@ router.post("/forgot-password", async (req, res) => {
       return res.status(400).json({ message: "Email is required." });
     }
 
-    const user = User.findByEmail(email);
+    const user = await User.findByEmail(email);
     if (!user) {
       return res.status(404).json({ message: "User not found with this email." });
     }
@@ -233,7 +232,7 @@ router.post("/forgot-password", async (req, res) => {
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
-    User.saveOTP(user.id, otp, expiresAt);
+    await User.saveOTP(user.id, otp, expiresAt);
 
     const emailData = otpEmail({ name: user.name, otp });
     await sendEmail({
@@ -263,7 +262,7 @@ router.post("/reset-password", async (req, res) => {
     }
 
     const newPasswordHash = await bcrypt.hash(newPassword, 10);
-    const updatedUser = User.updatePasswordWithOTP(email, otp, newPasswordHash);
+    const updatedUser = await User.updatePasswordWithOTP(email, otp, newPasswordHash);
 
     if (!updatedUser) {
       return res.status(400).json({ message: "Invalid or expired OTP." });

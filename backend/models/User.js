@@ -1,105 +1,115 @@
-const { v4: uuidv4 } = require("uuid");
-const { readDb, writeDb } = require("../data/db");
+const mongoose = require("mongoose");
 
-function findByEmail(email) {
-  const db = readDb();
-  return db.users.find(
-    (u) => u.email.toLowerCase() === String(email).toLowerCase()
-  );
+const userSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    email: { type: String, required: true, unique: true, lowercase: true },
+    passwordHash: { type: String, required: true },
+    sapId: { type: String, default: "" },
+    role: { type: String, default: null },
+    customRole: { type: String, default: "" },
+    relation: { type: mongoose.Schema.Types.Mixed, default: null },
+    department: { type: String, default: null },
+    assignableBy: { type: [String], default: [] },
+    resetOTP: { type: String, default: null },
+    resetOTPExpires: { type: String, default: null },
+  },
+  { timestamps: true }
+);
+
+const UserModel = mongoose.model("User", userSchema);
+
+// ---- Helper functions matching the old db.json-based API ----
+
+function toApiShape(doc) {
+  if (!doc) return null;
+  const obj = doc.toObject ? doc.toObject() : doc;
+  return { ...obj, id: obj._id.toString() };
 }
 
-function findById(id) {
-  const db = readDb();
-  return db.users.find((u) => u.id === id);
+async function findByEmail(email) {
+  const doc = await UserModel.findOne({ email: String(email).toLowerCase() });
+  return toApiShape(doc);
 }
 
-function createUser({
+async function findById(id) {
+  try {
+    const doc = await UserModel.findById(id);
+    return toApiShape(doc);
+  } catch (err) {
+    return null; // invalid ObjectId
+  }
+}
+
+async function createUser({
   name,
   email,
   passwordHash,
-  sapId = "", // Added SAP ID field
+  sapId = "",
   role = null,
   customRole = "",
   relation = null,
   department = null,
   assignableBy = [],
 }) {
-  const db = readDb();
-  const user = {
-    id: uuidv4(),
+  const doc = await UserModel.create({
     name,
     email: email.toLowerCase(),
     passwordHash,
-    sapId, // Store SAP ID here
-    role, 
-    customRole: role === "other" ? customRole : "", 
-    relation: role === "other" ? relation : null, 
-    department, 
-    assignableBy, 
-    resetOTP: null,
-    resetOTPExpires: null,
-    createdAt: new Date().toISOString(),
-  };
-  db.users.push(user);
-  writeDb(db);
-  return user;
+    sapId,
+    role,
+    customRole: role === "other" ? customRole : "",
+    relation: role === "other" ? relation : null,
+    department,
+    assignableBy,
+  });
+  return toApiShape(doc);
 }
 
-// Update Role, Custom Role, Relation, Department and SAP ID for Onboarding Profile Setup
-function updateProfile(userId, { role, customRole, relation, department, sapId }) {
-  const db = readDb();
-  const user = db.users.find((u) => u.id === userId);
-  if (user) {
-    user.role = role !== undefined ? role : user.role;
-    user.customRole = role === "other" ? customRole : "";
-    user.relation = role === "other" ? relation : null;
-    user.department = department !== undefined ? department : user.department;
-    user.sapId = sapId !== undefined ? sapId : user.sapId; // Update SAP ID if provided
-    writeDb(db);
-  }
-  return user;
+async function updateProfile(userId, { role, customRole, relation, department, sapId }) {
+  const update = {};
+  if (role !== undefined) update.role = role;
+  update.customRole = role === "other" ? customRole : "";
+  update.relation = role === "other" ? relation : null;
+  if (department !== undefined) update.department = department;
+  if (sapId !== undefined) update.sapId = sapId;
+
+  const doc = await UserModel.findByIdAndUpdate(userId, update, { new: true });
+  return toApiShape(doc);
 }
 
-// Find all team members belonging to the same department
-function findByDepartment(department) {
-  const db = readDb();
+async function findByDepartment(department) {
   if (!department) return [];
-  return db.users.filter(
-    (u) => u.department && u.department.toLowerCase() === department.toLowerCase()
+  const docs = await UserModel.find({
+    department: new RegExp(`^${department}$`, "i"),
+  });
+  return docs.map(toApiShape);
+}
+
+async function saveOTP(userId, otp, expiresAt) {
+  const doc = await UserModel.findByIdAndUpdate(
+    userId,
+    { resetOTP: otp, resetOTPExpires: expiresAt },
+    { new: true }
   );
+  return toApiShape(doc);
 }
 
-// Save OTP to DB
-function saveOTP(userId, otp, expiresAt) {
-  const db = readDb();
-  const user = db.users.find((u) => u.id === userId);
-  if (user) {
-    user.resetOTP = otp;
-    user.resetOTPExpires = expiresAt;
-    writeDb(db);
-  }
-  return user;
-}
-
-// Verify OTP & Update Password
-function updatePasswordWithOTP(email, otp, newPasswordHash) {
-  const db = readDb();
+async function updatePasswordWithOTP(email, otp, newPasswordHash) {
   const now = new Date().toISOString();
+  const doc = await UserModel.findOne({
+    email: String(email).toLowerCase(),
+    resetOTP: otp,
+    resetOTPExpires: { $gt: now },
+  });
 
-  const user = db.users.find(
-    (u) =>
-      u.email.toLowerCase() === String(email).toLowerCase() &&
-      u.resetOTP === otp &&
-      u.resetOTPExpires > now
-  );
+  if (!doc) return null;
 
-  if (!user) return null;
-
-  user.passwordHash = newPasswordHash;
-  user.resetOTP = null;
-  user.resetOTPExpires = null;
-  writeDb(db);
-  return user;
+  doc.passwordHash = newPasswordHash;
+  doc.resetOTP = null;
+  doc.resetOTPExpires = null;
+  await doc.save();
+  return toApiShape(doc);
 }
 
 function toPublic(user) {

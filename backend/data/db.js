@@ -1,25 +1,17 @@
-const fs = require("fs");
-const path = require("path");
+const mongoose = require("mongoose");
 
-const DB_FILE = path.join(__dirname, "db.json");
-
-function ensureDb() {
-  if (!fs.existsSync(DB_FILE)) {
-    fs.writeFileSync(
-      DB_FILE,
-      JSON.stringify({ users: [], tasks: [] }, null, 2)
-    );
+async function connectDB() {
+  try {
+    const uri = process.env.MONGO_URI;
+    if (!uri) {
+      throw new Error("MONGO_URI is not defined in environment variables.");
+    }
+    await mongoose.connect(uri);
+    console.log("MongoDB connected successfully.");
+  } catch (err) {
+    console.error("MongoDB connection error:", err.message);
+    process.exit(1);
   }
 }
 
-function readDb() {
-  ensureDb();
-  const raw = fs.readFileSync(DB_FILE, "utf-8");
-  return JSON.parse(raw || "{}");
-}
-
-function writeDb(data) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
-}
-
-module.exports = { readDb, writeDb };
+module.exports = connectDB;

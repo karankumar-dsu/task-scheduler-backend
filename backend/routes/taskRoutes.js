@@ -6,7 +6,6 @@ const { sendEmail, taskAssignedEmail } = require("../utils/sendEmail");
 const multer = require("multer");
 const path = require("path");
 
-// Safely require socket
 let emitToEmail = () => {};
 try {
   const socketUtil = require("../utils/socket");
@@ -17,10 +16,9 @@ try {
   // Socket fallback
 }
 
-// Dynamic Rank Calculation Helper
 function getRoleRank(user) {
   if (!user) return 0;
-  
+
   const baseRanks = {
     "Admin": 5,
     "Division Head": 4,
@@ -34,7 +32,6 @@ function getRoleRank(user) {
     return baseRanks[user.role];
   }
 
-  // Handle custom dynamic roles relative position
   if (user.role === "other" && user.relation) {
     const refRank = baseRanks[user.relation.referenceRole] ?? 2;
     return user.relation.position === "above" ? refRank + 0.5 : refRank - 0.5;
@@ -43,7 +40,6 @@ function getRoleRank(user) {
   return 1;
 }
 
-// Multer Config for Files Upload
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, "uploads/voicemails/");
@@ -62,9 +58,9 @@ function todayStr(d = new Date()) {
 }
 
 // GET /api/tasks?type=personal|team&sortBy=ai_priority
-router.get("/", (req, res) => {
+router.get("/", async (req, res) => {
   const { type, sortBy } = req.query;
-  let tasks = Task.forUser(req.user.email, req.user.id);
+  let tasks = await Task.forUser(req.user.email, req.user.id);
 
   if (type === "personal" || type === "team") {
     tasks = tasks.filter((t) => t.type === type);
@@ -80,8 +76,8 @@ router.get("/", (req, res) => {
 });
 
 // GET /api/tasks/stats
-router.get("/stats", (req, res) => {
-  const tasks = Task.forUser(req.user.email, req.user.id);
+router.get("/stats", async (req, res) => {
+  const tasks = await Task.forUser(req.user.email, req.user.id);
   const now = new Date();
 
   const stats = {
@@ -100,9 +96,9 @@ router.get("/stats", (req, res) => {
 });
 
 // GET /api/tasks/missed
-router.get("/missed", (req, res) => {
+router.get("/missed", async (req, res) => {
   const today = todayStr();
-  const tasks = Task.forUser(req.user.email, req.user.id);
+  const tasks = await Task.forUser(req.user.email, req.user.id);
 
   const missed = tasks.filter((t) => {
     if (t.status !== "pending" || !t.dueDate) return false;
@@ -112,12 +108,14 @@ router.get("/missed", (req, res) => {
     return true;
   });
 
-  missed.forEach((t) => Task.update(t.id, { missedNotifiedOn: today }));
+  for (const t of missed) {
+    await Task.update(t.id, { missedNotifiedOn: today });
+  }
 
   res.json({ missed });
 });
 
-// POST /api/tasks -> create task (WITH HIERARCHY DELEGATION GUARD)
+// POST /api/tasks -> create task
 router.post("/", upload.single("taskVoiceNote"), async (req, res) => {
   try {
     const {
@@ -135,42 +133,39 @@ router.post("/", upload.single("taskVoiceNote"), async (req, res) => {
     if (!title) {
       return res.status(400).json({ message: "Task title is required." });
     }
-    
-    // Team Task Validation & Hierarchy Protection Check
+
     if (type === "team") {
       if (!assignedEmail) {
         return res.status(400).json({ message: "A team member's email is required for team tasks." });
       }
 
-      const currentUser = User.findById(req.user.id);
-      const targetUser = User.findByEmail(assignedEmail);
+      const currentUser = await User.findById(req.user.id);
+      const targetUser = await User.findByEmail(assignedEmail);
 
       if (!targetUser) {
         return res.status(404).json({ message: "Assigned user email not found." });
       }
 
-      // 1. Cross-Department restriction
       if (currentUser.department !== targetUser.department && currentUser.role !== "Admin") {
         return res.status(403).json({ message: "Cannot assign tasks outside your department." });
       }
 
-      // 2. Hierarchy Rank Restriction Check
       const myRank = getRoleRank(currentUser);
       const targetRank = getRoleRank(targetUser);
 
-      const isExplicitlyAllowed = targetUser.assignableBy && 
+      const isExplicitlyAllowed = targetUser.assignableBy &&
         (targetUser.assignableBy.includes(currentUser.role) || targetUser.assignableBy.includes("ALL"));
 
       if (currentUser.role !== "Admin" && !isExplicitlyAllowed && myRank <= targetRank) {
-        return res.status(403).json({ 
-          message: `Hierarchy Restriction: You cannot assign tasks to ${targetUser.name} (${targetUser.customRole || targetUser.role}) as they hold an equal or higher level.` 
+        return res.status(403).json({
+          message: `Hierarchy Restriction: You cannot assign tasks to ${targetUser.name} (${targetUser.customRole || targetUser.role}) as they hold an equal or higher level.`,
         });
       }
     }
 
     const taskVoiceNoteUrl = req.file ? `/uploads/voicemails/${req.file.filename}` : null;
 
-    const task = Task.create({
+    const task = await Task.create({
       title,
       description,
       type,
@@ -186,7 +181,7 @@ router.post("/", upload.single("taskVoiceNote"), async (req, res) => {
     });
 
     if (task.type === "team") {
-      const assigneeUser = User.findByEmail(task.assignedEmail);
+      const assigneeUser = await User.findByEmail(task.assignedEmail);
       const { subject, html } = taskAssignedEmail({
         assigneeName: assigneeUser ? assigneeUser.name : "",
         taskTitle: task.title,
@@ -228,7 +223,7 @@ router.post(
   ]),
   async (req, res) => {
     try {
-      const task = Task.findById(req.params.id);
+      const task = await Task.findById(req.params.id);
       if (!canEdit(task, req.user)) {
         return res.status(404).json({ message: "Task not found." });
       }
@@ -248,7 +243,7 @@ router.post(
           .json({ message: "Comment message or media attachment is required." });
       }
 
-      const result = Task.addComment(task.id, {
+      const result = await Task.addComment(task.id, {
         senderEmail: req.user.email,
         senderName: req.user.name || req.user.email,
         message: messageText,
@@ -271,7 +266,7 @@ router.post(
 // 2. SIGN-OFF WITH VOICE MAIL ROUTE
 router.post("/:id/sign-off", upload.single("voiceMail"), async (req, res) => {
   try {
-    const task = Task.findById(req.params.id);
+    const task = await Task.findById(req.params.id);
     if (!canEdit(task, req.user)) {
       return res.status(404).json({ message: "Task not found." });
     }
@@ -287,7 +282,7 @@ router.post("/:id/sign-off", upload.single("voiceMail"), async (req, res) => {
       ...(voiceMailUrl && { voiceMailUrl }),
     };
 
-    const updatedTask = Task.update(task.id, patch);
+    const updatedTask = await Task.update(task.id, patch);
 
     res.json({ message: "Task signed off successfully!", task: updatedTask });
   } catch (err) {
@@ -297,8 +292,8 @@ router.post("/:id/sign-off", upload.single("voiceMail"), async (req, res) => {
 });
 
 // PATCH /api/tasks/:id -> generic update
-router.patch("/:id", (req, res) => {
-  const task = Task.findById(req.params.id);
+router.patch("/:id", async (req, res) => {
+  const task = await Task.findById(req.params.id);
   if (!canEdit(task, req.user)) {
     return res.status(404).json({ message: "Task not found." });
   }
@@ -310,18 +305,18 @@ router.patch("/:id", (req, res) => {
   }
   if (patch.dueDate) patch.reminderSentAt = null;
 
-  const updated = Task.update(task.id, patch);
+  const updated = await Task.update(task.id, patch);
   res.json({ task: updated });
 });
 
 // PATCH /api/tasks/:id/complete -> toggle complete
-router.patch("/:id/complete", (req, res) => {
-  const task = Task.findById(req.params.id);
+router.patch("/:id/complete", async (req, res) => {
+  const task = await Task.findById(req.params.id);
   if (!canEdit(task, req.user)) {
     return res.status(404).json({ message: "Task not found." });
   }
   const nowCompleted = task.status !== "completed";
-  const updated = Task.update(task.id, {
+  const updated = await Task.update(task.id, {
     status: nowCompleted ? "completed" : "pending",
     completedAt: nowCompleted ? new Date().toISOString() : null,
   });
@@ -329,32 +324,32 @@ router.patch("/:id/complete", (req, res) => {
 });
 
 // PATCH /api/tasks/:id/pause -> pause
-router.patch("/:id/pause", (req, res) => {
-  const task = Task.findById(req.params.id);
+router.patch("/:id/pause", async (req, res) => {
+  const task = await Task.findById(req.params.id);
   if (!canEdit(task, req.user)) {
     return res.status(404).json({ message: "Task not found." });
   }
-  const updated = Task.update(task.id, { status: "paused" });
+  const updated = await Task.update(task.id, { status: "paused" });
   res.json({ task: updated });
 });
 
 // PATCH /api/tasks/:id/resume -> resume
-router.patch("/:id/resume", (req, res) => {
-  const task = Task.findById(req.params.id);
+router.patch("/:id/resume", async (req, res) => {
+  const task = await Task.findById(req.params.id);
   if (!canEdit(task, req.user)) {
     return res.status(404).json({ message: "Task not found." });
   }
-  const updated = Task.update(task.id, { status: "pending", reminderSentAt: null });
+  const updated = await Task.update(task.id, { status: "pending", reminderSentAt: null });
   res.json({ task: updated });
 });
 
 // DELETE /api/tasks/:id -> only owner
-router.delete("/:id", (req, res) => {
-  const task = Task.findById(req.params.id);
+router.delete("/:id", async (req, res) => {
+  const task = await Task.findById(req.params.id);
   if (!task || task.ownerId !== req.user.id) {
     return res.status(404).json({ message: "Task not found." });
   }
-  Task.remove(task.id);
+  await Task.remove(task.id);
   res.json({ message: "Task deleted successfully." });
 });
 
