@@ -1,197 +1,305 @@
-const express = require("express");
-const auth = require("../middleware/auth");
-const User = require("../models/User");
+import React, { useState, useRef, useEffect } from "react";
+import api from "../api/axios";
 
-const router = express.Router();
-router.use(auth);
+/**
+ * Voice-driven task creation assistant.
+ *
+ * Unlike a keyword-matching state machine, every user turn is sent to
+ * POST /api/assistant/interpret, which uses an LLM to understand natural,
+ * varied phrasing ("task banao", "ek kaam add karna hai", "naya to-do
+ * daalo", or a single sentence that supplies several fields at once).
+ * The backend returns the next thing to say, the merged/validated task
+ * fields collected so far, and whether enough info exists to save.
+ */
+export default function KaranAssistant({ onTaskCreated }) {
+  const [isListening, setIsListening] = useState(false);
+  const [transcript, setTranscript] = useState("");
+  const [status, setStatus] = useState("Standby");
+  const [phase, setPhase] = useState("IDLE"); // IDLE | CONVERSING | SAVING
 
-// Same rank helper used in taskRoutes.js — kept local to avoid coupling the two files.
-function getRoleRank(user) {
-  if (!user) return 0;
-  const baseRanks = {
-    Admin: 5,
-    "Division Head": 4,
-    "Wing Head": 3,
-    "Team Lead": 2,
-    "Team Member": 1,
-    Intern: 0,
+  const recognitionRef = useRef(null);
+  const recognitionActiveRef = useRef(false);
+  const isListeningRef = useRef(false);
+  const phaseRef = useRef("IDLE");
+
+  // Running conversation state sent to the backend each turn.
+  const historyRef = useRef([]); // [{role:"user"|"assistant", content:string}]
+  const fieldsRef = useRef({}); // merged/validated task fields returned by the backend
+
+  useEffect(() => {
+    isListeningRef.current = isListening;
+  }, [isListening]);
+
+  const setPhaseBoth = (val) => {
+    phaseRef.current = val;
+    setPhase(val);
   };
-  if (baseRanks[user.role] !== undefined) return baseRanks[user.role];
-  if (user.role === "other" && user.relation) {
-    const refRank = baseRanks[user.relation.referenceRole] ?? 2;
-    return user.relation.position === "above" ? refRank + 0.5 : refRank - 0.5;
-  }
-  return 1;
-}
 
-function getAssignableTeamMembers(currentUser) {
-  if (!currentUser || !currentUser.department) return [];
-  const currentUserRank = getRoleRank(currentUser);
-  const members = User.findByDepartment(currentUser.department);
-  return members.filter((m) => {
-    if (m.id === currentUser.id) return false;
-    if (currentUser.role === "Admin") return true;
-    if (m.assignableBy && Array.isArray(m.assignableBy)) {
-      if (m.assignableBy.includes(currentUser.role) || m.assignableBy.includes("ALL")) return true;
+  // ---- Text-to-speech, callback fires only once speech actually finishes ----
+  const speak = (text, callback) => {
+    if (!("speechSynthesis" in window)) {
+      if (callback) callback();
+      return;
     }
-    return currentUserRank > getRoleRank(m);
-  });
-}
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.0;
+    utterance.pitch = 1.1;
+    utterance.lang = "hi-IN";
 
-// Fields the assistant is trying to fill in, mirroring TaskForm.jsx exactly.
-const REQUIRED_ALWAYS = ["title", "type"];
+    const voices = window.speechSynthesis.getVoices();
+    const indianVoice = voices.find(
+      (v) => v.lang.includes("hi-IN") || v.name.includes("Swara") || v.name.includes("Hindi")
+    );
+    if (indianVoice) utterance.voice = indianVoice;
 
-function buildSystemPrompt(teamMembers, todayIso) {
-  const membersList = teamMembers.length
-    ? teamMembers.map((m) => `- ${m.name} <${m.email}> (${m.customRole || m.role})`).join("\n")
-    : "(no assignable team members found for this user)";
+    utterance.onend = () => callback && callback();
+    utterance.onerror = () => callback && callback(); // don't get stuck if TTS itself fails
 
-  return `You are a voice task-creation assistant embedded in a to-do list web app. You speak Hinglish (mix of Hindi and English) naturally and casually, like a helpful assistant would to an Indian user. You are professional but warm — never robotic-sounding filler.
+    window.speechSynthesis.speak(utterance);
+  };
 
-Your job: through natural back-and-forth conversation, collect enough information to create ONE task, then hand back structured JSON.
+  // ---- Create the recognition instance exactly once ----
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
 
-The task object you are filling in has these fields:
-- title (string, required) — short task name
-- description (string, optional)
-- type ("personal" | "team", required)
-- assignedEmail (string, required ONLY if type is "team") — MUST be the exact email of one of the team members listed below. Never invent an email. If the person's spoken name is ambiguous or matches nobody in the list, ask them to clarify or pick from the list by name.
-- dueDate (ISO 8601 datetime string, optional but should be asked for) — combine any date + time the user gives you into one ISO datetime. Today's date is ${todayIso}.
-- priority ("low" | "medium" | "high", default "medium")
-- effortHours (number, default 1)
-- reminderMinutesBefore (number, default 30)
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    // en-IN transcribes Hinglish in Latin script most reliably. The LLM on
+    // the backend can handle either script anyway, so this is just for
+    // best-effort accuracy, not a hard requirement like the old keyword version.
+    recognition.lang = "en-IN";
 
-Team members this user is allowed to assign tasks to:
-${membersList}
+    recognition.onstart = () => {
+      recognitionActiveRef.current = true;
+    };
 
-Rules:
-- The user may phrase things in totally different ways each time ("task banao", "ek kaam add karna hai", "naya to-do daalo", etc.) — never rely on fixed keywords, understand intent from meaning.
-- Only ask about ONE missing thing at a time, in a short natural Hinglish sentence.
-- If type is "personal", never ask about assignedEmail.
-- If type is "team" and the user hasn't named a valid member yet, ask for it before asking anything else about the task.
-- If the user's message clearly supplies multiple fields at once (e.g. "team task banao, priya ko high priority ka bug fix task do kal tak"), extract everything you can in one go rather than asking one by one.
-- Once title, type (and assignedEmail if team) are known, you may use sensible defaults for anything the user skips or says "skip"/"chhodo"/"koi zarurat nahi" for (priority=medium, effortHours=1, reminderMinutesBefore=30, description="").
-- Never fabricate a dueDate — if the user never gives one after being asked once, leave it null and move on.
-- When you have title, type, and (if team) a valid assignedEmail, set "done": true and stop asking further questions unless the user is still actively giving more detail.
-- If the user says something unrelated to task creation, gently steer back in your "reply".
+    recognition.onresult = (event) => {
+      const spoken = event.results[0][0].transcript.trim();
+      setTranscript(spoken);
+      handleUserTurn(spoken);
+    };
 
-You MUST respond with ONLY a single valid JSON object, no markdown fences, no extra text, in exactly this shape:
-{
-  "reply": "short Hinglish sentence to speak back to the user",
-  "done": boolean,
-  "fields": {
-    "title": string | null,
-    "description": string | null,
-    "type": "personal" | "team" | null,
-    "assignedEmail": string | null,
-    "dueDate": string | null,
-    "priority": "low" | "medium" | "high" | null,
-    "effortHours": number | null,
-    "reminderMinutesBefore": number | null
-  }
-}`;
-}
+    recognition.onerror = (event) => {
+      recognitionActiveRef.current = false;
+      if (event.error === "no-speech") {
+        setStatus("Kuch suna nahi, phir se boliye...");
+        safeStart();
+        return;
+      }
+      console.error("Speech error", event.error);
+      setStatus("Error - dobara try karein");
+      setIsListening(false);
+    };
 
-// POST /api/assistant/interpret
-// Body: { message: string, history: [{role: "user"|"assistant", content: string}], fields: {...current known fields...} }
-router.post("/interpret", async (req, res) => {
-  try {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return res.status(500).json({ message: "ANTHROPIC_API_KEY is not configured on the server." });
-    }
+    recognition.onend = () => {
+      recognitionActiveRef.current = false;
+      if (isListeningRef.current && phaseRef.current === "CONVERSING") {
+        safeStart(); // recovers from silent timeouts some browsers produce
+      }
+    };
 
-    const { message, history = [], fields = {} } = req.body;
-    if (!message || !message.trim()) {
-      return res.status(400).json({ message: "message is required." });
-    }
+    recognitionRef.current = recognition;
 
-    const currentUser = User.findById(req.user.id);
-    const teamMembers = getAssignableTeamMembers(currentUser);
-    const todayIso = new Date().toISOString();
+    return () => {
+      try {
+        recognition.onstart = null;
+        recognition.onresult = null;
+        recognition.onerror = null;
+        recognition.onend = null;
+        recognition.abort();
+      } catch (e) {
+        /* no-op */
+      }
+    };
+  }, []);
 
-    const systemPrompt = buildSystemPrompt(teamMembers, todayIso);
-
-    // Give the model the running state of known fields so it doesn't re-ask
-    // things it already has, and doesn't forget things across turns.
-    const stateNote = `Current known fields (from earlier in this conversation): ${JSON.stringify(fields)}`;
-
-    const messages = [
-      ...history.map((h) => ({ role: h.role, content: h.content })),
-      { role: "user", content: `${stateNote}\n\nUser just said: "${message}"` },
-    ];
-
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-5",
-        max_tokens: 500,
-        system: systemPrompt,
-        messages,
-      }),
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error("Anthropic API error:", response.status, errText);
-      return res.status(502).json({ message: "AI assistant is temporarily unavailable." });
-    }
-
-    const data = await response.json();
-    const rawText = (data.content || [])
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join("");
-
-    let parsed;
+  const safeStart = () => {
+    if (!recognitionRef.current) return;
+    if (recognitionActiveRef.current) return; // avoid InvalidStateError from double start()
     try {
-      // Model is instructed to return pure JSON, but strip code fences defensively.
-      const cleaned = rawText.replace(/```json|```/g, "").trim();
-      parsed = JSON.parse(cleaned);
-    } catch (parseErr) {
-      console.error("Failed to parse AI response as JSON:", rawText);
-      return res.status(502).json({
-        message: "AI response could not be understood.",
-        reply: "Mujhe thoda samajhne mein dikkat hui, ek baar phir se boliye.",
-        done: false,
-        fields,
+      setStatus("Listening...");
+      setIsListening(true);
+      recognitionRef.current.start();
+    } catch (err) {
+      console.error("start() failed", err);
+      setStatus("Mic start nahi ho paaya, dobara try karein");
+      setIsListening(false);
+    }
+  };
+
+  const resetConversation = () => {
+    historyRef.current = [];
+    fieldsRef.current = {};
+  };
+
+  const toggleAssistant = () => {
+    if (isListening || phaseRef.current !== "IDLE") {
+      try {
+        recognitionRef.current?.abort();
+      } catch (e) {
+        /* no-op */
+      }
+      setIsListening(false);
+      setStatus("Standby");
+      setPhaseBoth("IDLE");
+      resetConversation();
+      return;
+    }
+
+    setTranscript("");
+    resetConversation();
+    setPhaseBoth("CONVERSING");
+    setStatus("Bol raha hoon...");
+    speak("Namaste! Boliye, kya task banana hai?", () => safeStart());
+  };
+
+  // ---- Every user utterance goes through the AI interpreter, no keyword matching ----
+  const handleUserTurn = async (spoken) => {
+    if (!spoken) {
+      safeStart();
+      return;
+    }
+
+    // A hard client-side escape hatch, so cancelling never depends on the model.
+    const lower = spoken.toLowerCase();
+    const cancelWords = ["cancel", "कैंसिल", "rok do", "रोक दो", "band karo", "बंद करो"];
+    if (cancelWords.some((w) => lower.includes(w))) {
+      setPhaseBoth("IDLE");
+      setStatus("Standby");
+      setIsListening(false);
+      resetConversation();
+      speak("Theek hai, cancel kar diya.");
+      return;
+    }
+
+    setStatus("Samajh raha hoon...");
+
+    try {
+      const res = await api.post("/assistant/interpret", {
+        message: spoken,
+        history: historyRef.current,
+        fields: fieldsRef.current,
       });
-    }
 
-    // Merge: keep any previously-known field if the model returned null for it this turn.
-    const mergedFields = { ...fields };
-    for (const [key, value] of Object.entries(parsed.fields || {})) {
-      if (value !== null && value !== undefined && value !== "") {
-        mergedFields[key] = value;
+      const { reply, done, fields } = res.data;
+
+      historyRef.current = [
+        ...historyRef.current,
+        { role: "user", content: spoken },
+        { role: "assistant", content: reply },
+      ];
+      fieldsRef.current = fields || fieldsRef.current;
+
+      if (done) {
+        await saveTask(fieldsRef.current, reply);
+      } else {
+        speak(reply, () => safeStart());
       }
+    } catch (err) {
+      console.error("Assistant interpret error:", err);
+      const message = err.response?.data?.message || "Kuch samajhne mein dikkat hui.";
+      setStatus("Error");
+      speak(`${message} Phir se boliye.`, () => safeStart());
     }
+  };
 
-    // Validate assignedEmail against the real list before trusting it.
-    if (mergedFields.type === "team" && mergedFields.assignedEmail) {
-      const validEmails = teamMembers.map((m) => m.email.toLowerCase());
-      if (!validEmails.includes(String(mergedFields.assignedEmail).toLowerCase())) {
-        mergedFields.assignedEmail = null; // don't let a hallucinated email through
-      }
+  const saveTask = async (fields, spokenConfirmation) => {
+    setPhaseBoth("SAVING");
+    setStatus("Saving...");
+    try {
+      const formData = new FormData();
+      formData.append("title", fields.title || "");
+      formData.append("description", fields.description || "");
+      formData.append("type", fields.type || "personal");
+      formData.append("assignedEmail", fields.type === "team" ? fields.assignedEmail || "" : "");
+      formData.append("dueDate", fields.dueDate || "");
+      formData.append("reminderMinutesBefore", fields.reminderMinutesBefore ?? 30);
+      formData.append("priority", fields.priority || "medium");
+      formData.append("effortHours", fields.effortHours ?? 1);
+
+      const res = await api.post("/tasks", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+
+      setStatus("Done!");
+      setIsListening(false);
+      speak(`Badhai ho! ${fields.title} naam se task ban gaya hai.`);
+
+      if (onTaskCreated) onTaskCreated(res.data.task);
+      resetConversation();
+      setPhaseBoth("IDLE");
+    } catch (err) {
+      console.error("Task save error:", err);
+      const message = err.response?.data?.message || "Task save karne mein pareshani aa gayi hai.";
+      setStatus("Error");
+      setIsListening(false);
+      speak(message);
+      setPhaseBoth("IDLE");
     }
+  };
 
-    const readyToSave =
-      !!mergedFields.title &&
-      !!mergedFields.type &&
-      (mergedFields.type !== "team" || !!mergedFields.assignedEmail);
+  return (
+    <div style={styles.container}>
+      <button
+        onClick={toggleAssistant}
+        style={{
+          ...styles.btn,
+          backgroundColor: isListening ? "#10b981" : "#1e1b4b",
+          boxShadow: isListening ? "0 0 20px rgba(16, 185, 129, 0.6)" : "0 4px 14px rgba(0,0,0,0.3)",
+        }}
+        title="Toggle AI Assistant"
+      >
+        {isListening ? "🎙️ Sun raha hoon..." : "🤖 Start Assistant"}
+      </button>
 
-    res.json({
-      reply: parsed.reply,
-      done: !!parsed.done && readyToSave,
-      fields: mergedFields,
-      teamMembers: teamMembers.map((m) => ({ name: m.name, email: m.email, role: m.customRole || m.role })),
-    });
-  } catch (err) {
-    console.error("Assistant interpret error:", err);
-    res.status(500).json({ message: "Something went wrong understanding that." });
-  }
-});
+      <div style={styles.card}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ fontSize: "11px", fontWeight: "700", color: "#10b981", textTransform: "uppercase" }}>
+            Voice Agent ({phase})
+          </span>
+          <span style={{ fontSize: "11px", color: "#64748b" }}>{status}</span>
+        </div>
+        {transcript && (
+          <p style={{ fontSize: "12px", color: "#334155", margin: "4px 0 0", fontStyle: "italic" }}>
+            "{transcript}"
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
 
-module.exports = router;
+const styles = {
+  container: {
+    position: "fixed",
+    bottom: "24px",
+    right: "24px",
+    zIndex: 9999,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-end",
+    gap: "8px",
+    fontFamily: "inherit",
+  },
+  btn: {
+    color: "#ffffff",
+    border: "none",
+    padding: "12px 20px",
+    borderRadius: "30px",
+    fontSize: "14px",
+    fontWeight: "700",
+    cursor: "pointer",
+    transition: "all 0.3s ease",
+  },
+  card: {
+    backgroundColor: "#ffffff",
+    padding: "10px 14px",
+    borderRadius: "12px",
+    border: "1px solid #e2e8f0",
+    width: "260px",
+    boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.1)",
+  },
+};

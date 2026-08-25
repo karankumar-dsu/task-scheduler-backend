@@ -24,10 +24,10 @@ function getRoleRank(user) {
   return 1;
 }
 
-function getAssignableTeamMembers(currentUser) {
+async function getAssignableTeamMembers(currentUser) {
   if (!currentUser || !currentUser.department) return [];
   const currentUserRank = getRoleRank(currentUser);
-  const members = User.findByDepartment(currentUser.department);
+  const members = await User.findByDepartment(currentUser.department);
   return members.filter((m) => {
     if (m.id === currentUser.id) return false;
     if (currentUser.role === "Admin") return true;
@@ -37,9 +37,6 @@ function getAssignableTeamMembers(currentUser) {
     return currentUserRank > getRoleRank(m);
   });
 }
-
-// Fields the assistant is trying to fill in, mirroring TaskForm.jsx exactly.
-const REQUIRED_ALWAYS = ["title", "type"];
 
 function buildSystemPrompt(teamMembers, todayIso) {
   const membersList = teamMembers.length
@@ -104,14 +101,12 @@ router.post("/interpret", async (req, res) => {
       return res.status(400).json({ message: "message is required." });
     }
 
-    const currentUser = User.findById(req.user.id);
-    const teamMembers = getAssignableTeamMembers(currentUser);
+    const currentUser = await User.findById(req.user.id);
+    const teamMembers = await getAssignableTeamMembers(currentUser);
     const todayIso = new Date().toISOString();
 
     const systemPrompt = buildSystemPrompt(teamMembers, todayIso);
 
-    // Give the model the running state of known fields so it doesn't re-ask
-    // things it already has, and doesn't forget things across turns.
     const stateNote = `Current known fields (from earlier in this conversation): ${JSON.stringify(fields)}`;
 
     const messages = [
@@ -148,7 +143,6 @@ router.post("/interpret", async (req, res) => {
 
     let parsed;
     try {
-      // Model is instructed to return pure JSON, but strip code fences defensively.
       const cleaned = rawText.replace(/```json|```/g, "").trim();
       parsed = JSON.parse(cleaned);
     } catch (parseErr) {
@@ -161,7 +155,6 @@ router.post("/interpret", async (req, res) => {
       });
     }
 
-    // Merge: keep any previously-known field if the model returned null for it this turn.
     const mergedFields = { ...fields };
     for (const [key, value] of Object.entries(parsed.fields || {})) {
       if (value !== null && value !== undefined && value !== "") {
@@ -169,11 +162,10 @@ router.post("/interpret", async (req, res) => {
       }
     }
 
-    // Validate assignedEmail against the real list before trusting it.
     if (mergedFields.type === "team" && mergedFields.assignedEmail) {
       const validEmails = teamMembers.map((m) => m.email.toLowerCase());
       if (!validEmails.includes(String(mergedFields.assignedEmail).toLowerCase())) {
-        mergedFields.assignedEmail = null; // don't let a hallucinated email through
+        mergedFields.assignedEmail = null;
       }
     }
 
