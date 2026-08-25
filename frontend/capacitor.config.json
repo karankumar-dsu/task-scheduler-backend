@@ -1,0 +1,5 @@
+{
+  "appId": "com.taskscheduler.app",
+  "appName": "Task Scheduler",
+  "webDir": "dist"
+}

@@ -1,0 +1,5 @@
+{
+  "appId": "com.karankumar.taskscheduler",
+  "appName": "Task Scheduler",
+  "webDir": "frontend/dist"
+}
