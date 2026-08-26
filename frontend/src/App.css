@@ -694,3 +694,62 @@
   background: #fff;
   cursor: pointer;
 }
+/* ---------- Layout Polish Fixes (mobile overlap fix) ---------- */
+
+/* FAB button ko proper spacing aur top layer pe rakho */
+.fab {
+  z-index: 60;
+}
+
+/* Agar Voice Assistant floating widget hai to usko FAB ke upar stack karo */
+.voice-status,
+.assistant-widget,
+.voice-agent-badge {
+  z-index: 60;
+}
+
+@media (max-width: 820px) {
+  /* Content ko fixed buttons ke peeche jaane se roko */
+  .main {
+    padding: 20px 16px 110px; /* bottom space reserved for floating buttons */
+  }
+
+  .fab {
+    bottom: 20px;
+    right: 16px;
+  }
+
+  /* Agar voice badge alag se fixed hai, FAB ke upar gap ke sath stack ho */
+  .voice-status,
+  .assistant-widget,
+  .voice-agent-badge {
+    bottom: 84px;
+    right: 16px;
+  }
+
+  /* Sort row ko wrap karne do taake dropdown squeeze na ho */
+  .main-header,
+  .stats-row {
+    gap: 12px;
+  }
+}
+
+@media (max-width: 480px) {
+  .stats-row {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+
+  .stat-card {
+    padding: 12px 14px;
+  }
+
+  .task-actions {
+    flex-wrap: wrap;
+  }
+}
+.field input[type="file"] {
+  padding: 8px;
+  background: #fff;
+  cursor: pointer;
+}

@@ -242,7 +242,7 @@ export default function KaranAssistant({ onTaskCreated }) {
   };
 
   return (
-    <div style={styles.container}>
+    <div className="karan-assistant-widget" style={styles.container}>
       <button
         onClick={toggleAssistant}
         style={{
@@ -274,10 +274,6 @@ export default function KaranAssistant({ onTaskCreated }) {
 
 const styles = {
   container: {
-    position: "fixed",
-    bottom: "24px",
-    right: "24px",
-    zIndex: 9999,
     display: "flex",
     flexDirection: "column",
     alignItems: "flex-end",
