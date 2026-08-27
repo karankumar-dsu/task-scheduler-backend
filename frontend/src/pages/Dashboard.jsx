@@ -23,6 +23,10 @@ export default function Dashboard() {
   // VS Code Collapsible Tree State
   const [teamMenuOpen, setTeamMenuOpen] = useState(true);
 
+  // Mobile drawer sidebar state — only relevant below the 820px breakpoint,
+  // desktop CSS ignores this class entirely so the desktop layout is untouched.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
   const getGreeting = () => {
     const hour = new Date().getHours();
     if (hour < 12) return "Good morning";
@@ -91,6 +95,13 @@ export default function Dashboard() {
     loadStats();
   }
 
+  // Selecting a filter from the mobile drawer should also close the drawer,
+  // so the person actually sees the list they just picked. No effect on desktop.
+  function selectFilter(value) {
+    setFilter(value);
+    setSidebarOpen(false);
+  }
+
   // Hierarchy Badges Counter
   const incomingTasks = tasks.filter(
     (t) => t.type === "team" && t.assignedEmail === user?.email && t.status !== "completed"
@@ -138,8 +149,33 @@ export default function Dashboard() {
         />
       )}
 
-      {/* Modern VS Code Style Tree Sidebar */}
-      <aside className="sidebar">
+      {/* Mobile-only sticky top bar with hamburger. CSS keeps this hidden
+          (display:none) on desktop, so it never shows up above 820px. */}
+      <div className="mobile-topbar">
+        <div className="brand">
+          <span className="mark" />
+          <span>Task Scheduler</span>
+        </div>
+        <button
+          className="hamburger-btn"
+          onClick={() => setSidebarOpen(true)}
+          aria-label="Open menu"
+        >
+          ☰
+        </button>
+      </div>
+
+      {/* Dark backdrop shown only while the mobile drawer is open (CSS hides
+          it entirely on desktop regardless of this being rendered). */}
+      {sidebarOpen && (
+        <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />
+      )}
+
+      {/* Modern VS Code Style Tree Sidebar.
+          On desktop this renders exactly as before (in-flow, first grid column).
+          On mobile the CSS turns it into a fixed slide-in drawer, toggled by
+          the "open" class below. */}
+      <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <div>
           <div className="brand" style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "24px" }}>
             <span className="mark" style={{ width: "28px", height: "28px", borderRadius: "8px", backgroundColor: "var(--accent)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: "700" }}>⚡</span>
@@ -147,7 +183,10 @@ export default function Dashboard() {
           </div>
 
           <button
-            onClick={() => setShowForm(true)}
+            onClick={() => {
+              setShowForm(true);
+              setSidebarOpen(false);
+            }}
             style={{
               width: "100%",
               padding: "10px 14px",
@@ -168,7 +207,7 @@ export default function Dashboard() {
             {/* Home / All Tasks */}
             <button
               className={`nav-item ${filter === "all" ? "active" : ""}`}
-              onClick={() => setFilter("all")}
+              onClick={() => selectFilter("all")}
             >
               <span>🏠</span>
               <span>Home / All Tasks</span>
@@ -177,7 +216,7 @@ export default function Dashboard() {
             {/* Personal Tasks */}
             <button
               className={`nav-item ${filter === "personal" ? "active" : ""}`}
-              onClick={() => setFilter("personal")}
+              onClick={() => selectFilter("personal")}
             >
               <span>👤</span>
               <span>Personal Tasks</span>
@@ -244,7 +283,7 @@ export default function Dashboard() {
                 >
                   {/* 1. Incoming Tasks */}
                   <button
-                    onClick={() => setFilter("team_incoming")}
+                    onClick={() => selectFilter("team_incoming")}
                     style={{
                       display: "flex",
                       alignItems: "center",
@@ -286,7 +325,7 @@ export default function Dashboard() {
 
                   {/* 2. Outgoing Tasks */}
                   <button
-                    onClick={() => setFilter("team_outgoing")}
+                    onClick={() => selectFilter("team_outgoing")}
                     style={{
                       display: "flex",
                       alignItems: "center",
@@ -332,7 +371,7 @@ export default function Dashboard() {
             {/* Completed */}
             <button
               className={`nav-item ${filter === "completed" ? "active" : ""}`}
-              onClick={() => setFilter("completed")}
+              onClick={() => selectFilter("completed")}
             >
               <span>✅</span>
               <span>Completed</span>
@@ -422,7 +461,7 @@ export default function Dashboard() {
         )}
 
         {/* Sort & Section Controls */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexWrap: "wrap", gap: "10px" }}>
           <div style={{ fontWeight: "600", fontSize: "16px", color: "#18181b" }}>
             {filter === "all" && "🏠 Home / All Tasks"}
             {filter === "personal" && "👤 Personal Tasks"}
